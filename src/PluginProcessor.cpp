@@ -3,14 +3,17 @@
 
 //==============================================================================
 AudioPluginAudioProcessor::AudioPluginAudioProcessor()
-     : AudioProcessor (BusesProperties()
-                     #if ! JucePlugin_IsMidiEffect
-                      #if ! JucePlugin_IsSynth
-                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                      #endif
-                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
-                     #endif
-                       )
+    : AudioProcessor (BusesProperties()
+#if ! JucePlugin_IsMidiEffect
+#if ! JucePlugin_IsSynth
+                         .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
+#endif
+                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+#endif
+                     ),
+    parameters(*this, nullptr, "Parameters", createParameterLayout()),
+    lowpassFilter(juce::dsp::IIR::Coefficients<float>::makeLowPass(44100, 20000.0f, 0.1f)),
+    hipassFilter(juce::dsp::IIR::Coefficients<float>::makeHighPass(44100, 20000.0f, 0.1f))
 {
 }
 
@@ -19,6 +22,48 @@ AudioPluginAudioProcessor::~AudioPluginAudioProcessor()
 }
 
 //==============================================================================
+
+juce::AudioProcessorValueTreeState::ParameterLayout AudioPluginAudioProcessor::createParameterLayout()
+{
+    std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
+
+    auto lowpassParam = std::make_unique<juce::AudioParameterFloat>(
+        "lowpass",
+        "Lowpass",
+        juce::NormalisableRange<float>(20.0f, 20000.0f, 0.01f, 0.25),
+        20000.0f
+        );
+
+    auto lpresParam = std::make_unique<juce::AudioParameterFloat>(
+        "lpres",
+        "Lowpass Resonance(Q)",
+        0.1f,
+        10.0f,
+        1.0f
+        );
+    auto hipassParam = std::make_unique<juce::AudioParameterFloat>(
+        "hipass",
+        "Hipass",
+        juce::NormalisableRange<float>(20.0f, 20000.0f, 0.01f, 0.25),
+        20.0f
+        );
+
+    auto hpresParam = std::make_unique<juce::AudioParameterFloat>(
+        "hpres",
+        "Hipass Resonance(Q)",
+        0.1f,
+        10.0f,
+        1.0f
+        );
+
+    params.push_back(std::move(lowpassParam));
+    params.push_back(std::move(lpresParam));
+    params.push_back(std::move(hipassParam));
+    params.push_back(std::move(hpresParam));
+
+
+    return { params.begin(), params.end() };
+}
 const juce::String AudioPluginAudioProcessor::getName() const
 {
     return JucePlugin_Name;
@@ -26,29 +71,29 @@ const juce::String AudioPluginAudioProcessor::getName() const
 
 bool AudioPluginAudioProcessor::acceptsMidi() const
 {
-   #if JucePlugin_WantsMidiInput
+#if JucePlugin_WantsMidiInput
     return true;
-   #else
+#else
     return false;
-   #endif
+#endif
 }
 
 bool AudioPluginAudioProcessor::producesMidi() const
 {
-   #if JucePlugin_ProducesMidiOutput
+#if JucePlugin_ProducesMidiOutput
     return true;
-   #else
+#else
     return false;
-   #endif
+#endif
 }
 
 bool AudioPluginAudioProcessor::isMidiEffect() const
 {
-   #if JucePlugin_IsMidiEffect
+#if JucePlugin_IsMidiEffect
     return true;
-   #else
+#else
     return false;
-   #endif
+#endif
 }
 
 double AudioPluginAudioProcessor::getTailLengthSeconds() const
@@ -59,7 +104,7 @@ double AudioPluginAudioProcessor::getTailLengthSeconds() const
 int AudioPluginAudioProcessor::getNumPrograms()
 {
     return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
+    // so this should be at least 1, even if you're not really implementing programs.
 }
 
 int AudioPluginAudioProcessor::getCurrentProgram()
@@ -86,9 +131,17 @@ void AudioPluginAudioProcessor::changeProgramName (int index, const juce::String
 //==============================================================================
 void AudioPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
-    juce::ignoreUnused (sampleRate, samplesPerBlock);
+    juce::dsp::ProcessSpec spec;
+
+    spec.sampleRate = sampleRate;
+    spec.maximumBlockSize = samplesPerBlock;
+    spec.numChannels = getTotalNumInputChannels();
+
+    lowpassFilter.prepare(spec);
+    lowpassFilter.reset();
+    hipassFilter.prepare(spec);
+    lowpassFilter.reset();
+    updateFilter();
 }
 
 void AudioPluginAudioProcessor::releaseResources()
@@ -99,30 +152,46 @@ void AudioPluginAudioProcessor::releaseResources()
 
 bool AudioPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-  #if JucePlugin_IsMidiEffect
+#if JucePlugin_IsMidiEffect
     juce::ignoreUnused (layouts);
     return true;
-  #else
+#else
     // This is the place where you check if the layout is supported.
     // In this template code we only support mono or stereo.
     // Some plugin hosts, such as certain GarageBand versions, will only
     // load plugins that support stereo bus layouts.
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-     && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+        && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
         return false;
 
     // This checks if the input layout matches the output layout
-   #if ! JucePlugin_IsSynth
+#if ! JucePlugin_IsSynth
     if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
         return false;
-   #endif
+#endif
 
     return true;
-  #endif
+#endif
+}
+
+void AudioPluginAudioProcessor::process(juce::dsp::ProcessContextReplacing<float> context)
+{
+
+}
+
+void AudioPluginAudioProcessor::updateFilter()
+{
+    float lpfreq = *parameters.getRawParameterValue("lowpass");
+    float lpres = *parameters.getRawParameterValue("lpres");
+    float hpfreq = *parameters.getRawParameterValue("hipass");
+    float hpres = *parameters.getRawParameterValue("hpres");
+
+    *lowpassFilter.state = *juce::dsp::IIR::Coefficients<float>::makeLowPass(getSampleRate(), lpfreq, lpres);
+    *hipassFilter.state = *juce::dsp::IIR::Coefficients<float>::makeHighPass(getSampleRate(), hpfreq, hpres);
 }
 
 void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
-                                              juce::MidiBuffer& midiMessages)
+                                             juce::MidiBuffer& midiMessages)
 {
     juce::ignoreUnused (midiMessages);
 
@@ -130,27 +199,14 @@ void AudioPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer (channel);
-        juce::ignoreUnused (channelData);
-        // ..do something to the data...
-    }
+    juce::dsp::AudioBlock<float> block(buffer);
+    updateFilter();
+    lowpassFilter.process(juce::dsp::ProcessContextReplacing<float> (block));
+    hipassFilter.process(juce::dsp::ProcessContextReplacing<float> (block));
+
 }
 
 //==============================================================================
